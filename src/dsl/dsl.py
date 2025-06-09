@@ -40,8 +40,8 @@ import pandas as pd
 from sklearn.base import BaseEstimator
 from sklearn.utils.validation import validate_data, check_is_fitted
 from sklearn.utils import check_random_state
-from sklearn.tree import RandomForestRegressor
-from sklearn.model_selection import KFold
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import StratifiedKFold
 
 from dsl.logit import logistic_regression, ModelResult
 
@@ -59,42 +59,60 @@ class DSLDataset:
     def __init__(
         self,
         data: pd.DataFrame,
-        y_var: str,
-        x_vars: str | list[str],
-        q_vars: str | list[str],
-        sample_weights: str = None,
+        gold_standard_col: str, # Y
+        predicted_val_cols: str | list[str], # Q
+        regressor_cols: str | list[str], # X
+        sample_weights: str = None, # pi
+        missing_indicator: str = None, # R, if None then use notna
+        random_seed: int = 634,  # Random seed for reproducibility
     ) -> None:
         # Checks
-        assert y_var in data.columns, "y_var must be a column in the data DataFrame"
-        if isinstance(q_vars, str):
-            q_vars = [q_vars]
-        if isinstance(x_vars, str):
-            x_vars = [x_vars]
+        assert gold_standard_col in data.columns, "y_var must be a column in the data DataFrame"
+        if isinstance(predicted_val_cols, str):
+            predicted_val_cols = [predicted_val_cols]
+        if isinstance(regressor_cols, str):
+            regressor_cols = [regressor_cols]
         assert all(
-            var in data.columns for var in q_vars
+            var in data.columns for var in predicted_val_cols
         ), "q_vars must be columns in the data DataFrame"
         assert all(
-            var in data.columns for var in x_vars
+            var in data.columns for var in regressor_cols
         ), "x_vars must be columns in the data DataFrame"
         assert (
             sample_weights is None or sample_weights in data.columns
         ), "sample_weights must be a column in the data DataFrame or None"
         # Initialize attributes
         self.dataframe = data
-        self.y = self.dataframe[y_var].values()
-        self.X = self.dataframe[x_vars].values()
-        self.Q = self.dataframe[q_vars].values()
+        self.y = self.dataframe[gold_standard_col].values()
+        self.X = self.dataframe[regressor_cols].values()
+        self.Q = self.dataframe[predicted_val_cols].values()
         if sample_weights is None:
             self.w = np.repeat(1 / self.dataframe.shape[0], self.dataframe.shape[0])
         elif isinstance(sample_weights, str):
             self.w = self.dataframe[sample_weights].values()
+        if missing_indicator is None:
+            self.R = self.dataframe[gold_standard_col].notna().values()
+        elif isinstance(missing_indicator, str):
+            self.R = self.dataframe[missing_indicator].values()
+        self._col_ref = {
+            "gold_standard_col": gold_standard_col,
+            "predicted_val_cols": predicted_val_cols,
+            "regressor_cols": regressor_cols,
+            "sample_weights": sample_weights,
+            "missing_indicator": missing_indicator,
+        }
+        self.random_seed = random_seed
 
     def sample_split(self, n_splits: int) -> None:
         """
         Split the dataset into `n_splits` partitions.
         This method should be implemented to create sample splits for DSL.
         """
-        pass
+        ss_split_iterator = StratifiedKFold(
+            n_splits=n_splits, shuffle=True, random_state=self.random_seed
+        )
+        self.sample_splits = [(train_idx, test_idx) for train_idx, test_idx in ss_split_iterator.split(self.X, self.y)]
+        
     
     def get_ss_partition(self, ss_idx: int) -> "DSLDataset":
         """
@@ -102,16 +120,41 @@ class DSLDataset:
         This method should be implemented to return a DSLDataset for the specified sample split.
         """
         # Placeholder implementation, should be replaced with actual logic
-        return self
+        if not hasattr(self, 'sample_splits'):
+            raise ValueError("Sample splits have not been created. Call `sample_split` first.")
+        split_idx, _ = self.sample_splits[ss_idx]
+        return DSLDataset(
+            data=self.dataframe.iloc[split_idx],
+            gold_standard_col=self._col_ref['gold_standard_col'],
+            predicted_val_cols=self._col_ref['predicted_val_cols'],
+            regressor_cols=self._col_ref['regressor_cols'],
+            sample_weights=self._col_ref['sample_weights'],
+            missing_indicator=self._col_ref['missing_indicator'],
+            random_seed=self.random_seed + ss_idx
+        )
 
-    def get_train_test(self, train_idx: np.ndarray, test_idx: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def get_train_test(self, train_idx: np.ndarray, test_idx: np.ndarray):
         """
         Get the training and testing data for the specified indices.
         """
         y_train = self.y[train_idx]
         X_train = self.X[train_idx]
+        Q_train = self.Q[train_idx]
+        
         X_test = self.X[test_idx]
         return y_train, X_train, X_test
+    
+    def __getitem__(self, key: str) -> pd.Series:
+        """
+        Get a column from the DataFrame by key.
+        """
+        return self.dataframe[key]
+    
+    def __len__(self) -> int:
+        """
+        Get the number of rows in the DataFrame.
+        """
+        return self.dataframe.shape[0]
 
 class DSLModel(BaseEstimator):
     """
@@ -168,7 +211,7 @@ class DSLModel(BaseEstimator):
 
     def _fit_split(self, ss_idx: int, n_cross_fit, sl_estimator, sl_kwargs):
         data_ss = self.data.get_ss_partition(ss_idx)
-        kfold_iterator = KFold(n_splits=n_cross_fit, random_seed=self.random_seed)
+        kfold_iterator = StratifiedKFold(n_splits=n_cross_fit, random_seed=self.random_seed)
         ghat_list = [
             sl_estimator(**sl_kwargs|{'random_seed': self.random_seed + (ss_idx*n_cross_fit) + k_idx})
             for k_idx in n_cross_fit
@@ -176,9 +219,12 @@ class DSLModel(BaseEstimator):
 
         for k_idx, (train_idx, test_idx) in kfold_iterator(data_ss):
             y_train, X_train, X_test = data_ss.get_train_test(train_idx, test_idx)
-            ghat_list[k_idx].fit(y_train, X_train)
-            ghat_list[k_idx].predict(X_test)
+            ghat, ytilde = self._fit_fold(y_train, X_train, X_test, ghat_list[k_idx])
 
+    def _fit_fold(self, y_train, X_train, X_test, ghat):
+        ghat.fit(y_train, X_train)
+        ytilde = ghat.predict(X_test)
+        return ghat, ytilde
 
 
     def _validate_inputs(

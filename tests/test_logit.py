@@ -1,3 +1,8 @@
+"""
+TODO: Compare results with statsmodels
+TODO: Compare results with sklearn
+"""
+
 import pytest
 import numpy as np
 from dsl.logit import (
