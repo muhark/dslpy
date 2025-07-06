@@ -187,3 +187,10 @@ def logistic_regression(
     se: NDArray[np.float64] = np.sqrt(np.diagonal(D @ V0 @ D.T))
 
     return ModelResult(coef, se, vcov)
+
+@njit
+def mean_estimator(Y: np.ndarray) -> ModelResult:
+    mean = np.mean(Y)
+    se = np.std(Y, ddof=1) / np.sqrt(Y.shape[0])
+    vcov = np.array([[se ** 2]])
+    return ModelResult(np.array([mean]), np.array([se]), vcov)
