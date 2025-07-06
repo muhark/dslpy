@@ -25,3 +25,19 @@
 [rtd-link]:                 https://dsl.readthedocs.io/en/latest/?badge=latest
 
 <!-- prettier-ignore-end -->
+
+
+_WIP Repository for Python implementation of Design-based Supervised Learning_.
+
+
+## Links to Papers
+
+- [Paper I (NeurIPS 2023)](https://proceedings.neurips.cc/paper_files/paper/2023/file/d862f7f5445255090de13b825b880d59-Paper-Conference.pdf)
+- [Paper II (Sociological Methods and Research)](https://journals.sagepub.com/doi/abs/10.1177/00491241251333372?mi=ehikzz)
+- [Paper III (Under Review)](https://naokiegami.com/paper/dsl_ss.pdf)
+
+## Companion R Package
+
+See [https://naokiegami.com/dsl/](https://naokiegami.com/dsl/).
+
+
