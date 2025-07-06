@@ -37,19 +37,16 @@ NOTE: Missing the bias correction term in the current implementation.
 
 """
 
-from dataclasses import dataclass, field
-
+from enum import Enum
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator
-from sklearn.utils.validation import validate_data, check_is_fitted
-from sklearn.utils import check_random_state
+from sklearn.linear_model import LinearRegression
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import BaseCrossValidator, StratifiedKFold
 
-from dsl.logit import logistic_regression, mean_estimator, ModelResult
-from enum import Enum
-from sklearn.linear_model import LinearRegression
+from dsl.estimators import LogisticRegression, MeanEstimator, ModelResult
+from dsl.data_utils import DSLDataset
 
 
 class DSLModelType(Enum):
@@ -61,156 +58,16 @@ class DSLModelType(Enum):
     def get_estimator(model_type: str):
         match model_type:
             case DSLModelType.LOGISTIC.value:
-                return logistic_regression
+                return LogisticRegression().fit
             case DSLModelType.LINEAR.value:
                 return LinearRegression
             case DSLModelType.MEAN.value:
-                return mean_estimator
+                return MeanEstimator().fit
             case _:
                 raise ValueError(f"Unknown model_type: {model_type}")
 
 
-@dataclass
-class DSLDatasetColumns:
-    """
-    DSLDatasetColumns is a dataclass that holds the column names for the DSLDataset.
-    It is used to ensure consistent access to the columns in the dataset.
-    """
-
-    gold_standard_col: str = field(default=None)
-    predicted_val_cols: str | list[str] = field(default=None)
-    regressor_cols: str | list[str] = field(default=None)
-    predictor_cols: str | list[str] = field(default=None)
-    sample_weights: str = field(default=None)
-    missing_indicator: str = field(default=None)
-
-    def __post_init__(self):
-        # Ensure that predicted_val_cols and regressor_cols are lists
-        if isinstance(self.predicted_val_cols, str):
-            self.predicted_val_cols = [self.predicted_val_cols]
-        if isinstance(self.regressor_cols, str):
-            self.regressor_cols = [self.regressor_cols]
-        if self.predictor_cols is not None:
-            if isinstance(self.predictor_cols, str):
-                self.predictor_cols = [self.predictor_cols]
-        # Validate that all columns are strings
-        assert all(
-            isinstance(col, str) for col in self.predicted_val_cols
-        ), "predicted_val_cols must be a string or list of strings"
-        assert all(
-            isinstance(col, str) for col in self.regressor_cols
-        ), "regressor_cols must be a string or list of strings"
-
-    def check_columns(self, data: pd.DataFrame) -> None:
-        """
-        Check that the columns specified in the dataclass are present
-        """
-        assert (
-            self.gold_standard_col in data.columns
-        ), f"gold_standard_col '{self.gold_standard_col}' not found in DataFrame"
-        for col in self.predicted_val_cols:
-            assert (
-                col in data.columns
-            ), f"predicted_val_col '{col}' not found in DataFrame"
-        for col in self.regressor_cols:
-            assert col in data.columns, f"regressor_col '{col}' not found in DataFrame"
-        if self.predictor_cols is not None:
-            for col in self.predictor_cols:
-                assert (
-                    col in data.columns
-                ), f"predictor_col '{col}' not found in DataFrame"
-        if self.sample_weights is not None:
-            assert (
-                self.sample_weights in data.columns
-            ), f"sample_weights '{self.sample_weights}' not found in DataFrame"
-        if self.missing_indicator is not None:
-            assert (
-                self.missing_indicator in data.columns
-            ), f"missing_indicator '{self.missing_indicator}' not found in DataFrame"
-
-
-class DSLDataset:
-    """
-    DSLDataset is currently just a wrapper around a pandas DataFrame, in order to have consistent methods for accessing the data.
-
-    TODO:
-    - Add methods for partitioning the data into sample splits for DSL (note--should be stratified on presence of gold standard)
-    - Add methods for partitioning the data into K folds for cross-validation
-    - Add methods for getting the data in a format suitable for scikit-learn estimators
-    """
-
-    def __init__(
-        self,
-        data: pd.DataFrame,
-        gold_standard_col: str,  # Y
-        predicted_val_cols: str | list[str],  # Q
-        regressor_cols: str | list[str],  # X
-        predictor_cols: str | list[str] = None,  # W
-        sample_weights: str = None,  # pi
-        missing_indicator: str = None,  # R, if None then use notna
-        random_seed: int = 634,  # Random seed for reproducibility
-    ) -> None:
-        # Init and validate columns
-        self._col_ref = DSLDatasetColumns(
-            gold_standard_col=gold_standard_col,
-            predicted_val_cols=predicted_val_cols,
-            regressor_cols=regressor_cols,
-            predictor_cols=predictor_cols,
-            sample_weights=sample_weights,
-            missing_indicator=missing_indicator,
-        )
-        self._col_ref.check_columns(data)
-        # Initialize attributes
-        self.dataframe = data
-        self.y = self.dataframe[self._col_ref.gold_standard_col].values
-        self.Q = self.dataframe[self._col_ref.predicted_val_cols].values
-        self.X = (
-            self.dataframe[self._col_ref.regressor_cols].values
-            if self.col_ref.regressor_cols
-            else None
-        )
-        self.W = (
-            self.dataframe[self._col_ref.predictor_cols].values
-            if self._col_ref.predictor_cols
-            else None
-        )
-        if sample_weights is None:
-            self.pi = np.repeat(1 / self.dataframe.shape[0], self.dataframe.shape[0])
-        elif isinstance(sample_weights, str):
-            self.pi = self.dataframe[sample_weights].values
-        if missing_indicator is None:
-            self.R = self.dataframe[gold_standard_col].notna().values
-        elif isinstance(missing_indicator, str):
-            self.R = self.dataframe[missing_indicator].values
-        self.random_seed = random_seed
-        # Convenience accessors
-        self.QWX = np.hstack(
-            self.Q,
-            self.W if self.W is not None else None,
-            self.X if self.X is not None else None,
-        )
-
-    def __getitem__(
-        self, idxs: int | list | slice | np.ndarray | pd.Series
-    ) -> "DSLDataset":
-        """
-        Return a new DSLDataset containing only the rows at the given indices.
-        Accepts any valid pandas indexer (int, list, slice, boolean array, etc).
-        """
-        new_data = self.dataframe.iloc[idxs].copy()
-        return DSLDataset(
-            data=new_data,
-            gold_standard_col=self._col_ref.gold_standard_col,
-            predicted_val_cols=self._col_ref.predicted_val_cols,
-            regressor_cols=self._col_ref.regressor_cols,
-            predictor_cols=self._col_ref.predictor_cols,
-            sample_weights=self._col_ref.sample_weights,
-            missing_indicator=self._col_ref.missing_indicator,
-            random_seed=self.random_seed,
-        )
-
-
-class DSLModel(BaseEstimator):
+class DSLModel:
 
     def __init__(
         self,
@@ -222,7 +79,12 @@ class DSLModel(BaseEstimator):
         sample_weights: str | None = None,
         missing_indicator: str | None = None,
         model_type: str = "logistic",
-        random_seed: int = 634,
+        random_state: int = 634,
+        n_cross_fit: int = 5,
+        sl_estimator: BaseEstimator = RandomForestRegressor,
+        cv_iterator: BaseCrossValidator = StratifiedKFold,
+        sl_kwargs: dict = {},
+        cv_iterator_kwargs: dict = {},
     ) -> None:
         self.data = DSLDataset(
             data=data,
@@ -235,16 +97,18 @@ class DSLModel(BaseEstimator):
         )
         self.model_type = model_type
         self.dsl_estimator = DSLModelType.get_estimator(model_type)
-        self.random_seed = random_seed
+        self.random_state = random_state
+        # Initialize cross-fitting parameters
+        self._sl_estimators = [
+            sl_estimator(**sl_kwargs | {"random_state": self.random_state + k_idx})
+            for k_idx in range(n_cross_fit)
+        ]
+        self.cv = cv_iterator(**cv_iterator_kwargs | {"n_splits": n_cross_fit})
+        self._splits = list(self.cv.split(range(len(self.data)), self.data.R))
 
     def fit(
         self,
-        n_cross_fit: int = 5,
-        sl_estimator: BaseEstimator = RandomForestRegressor,
-        cv_iterator: BaseCrossValidator = StratifiedKFold,
-        sl_kwargs: dict = {},
-        cv_iterator_kwargs: dict = {},
-    ) -> None:
+    ) -> ModelResult:
         """
         Split into K folds
         For each fold k in K
@@ -254,20 +118,15 @@ class DSLModel(BaseEstimator):
         Fit DSL estimator on ytilde ~ X
         """
         # Init SL estimators
-        self._sl_estimators = [
-            sl_estimator(**sl_kwargs | {"random_seed": self.random_seed + k_idx})
-            for k_idx in n_cross_fit
-        ]
-        self.cv = cv_iterator(**cv_iterator_kwargs | {"n_splits": n_cross_fit})
-        self._splits = list(self.cv.split(self.data, self.data[self.y_var]))
         self.pseudo_outcome = np.zeros_like(self.data.y, dtype=float)
         for fold_idx, (train_idx, test_idx) in enumerate(self._splits):
-            self.pseudo_outcome[test_idx] = self._fit_fold(fold_idx)
+            self.pseudo_outcome[test_idx] = self._fit_fold(fold_idx, train_idx, test_idx)
         # Fit DSL estimator on outcome
-        estimator_args = {"Y": self.pseudo_outcome} | (
-            {"X": self.data.X} if self.data.X else None
-        )
+        estimator_args = {"Y": self.pseudo_outcome}
+        if self.data.X is not None:
+            estimator_args |= {"X": self.data.X}
         self.result: ModelResult = self.dsl_estimator(**estimator_args)
+        return self.result
 
     def _fit_fold(
         self,
@@ -275,7 +134,9 @@ class DSLModel(BaseEstimator):
         train_idx: np.ndarray,
         test_idx: np.ndarray,
     ) -> np.ndarray:
-        "Fits \hat{g}_k(Q_i, W_i, X_i) on training data and predicts ytilde on test data"
+        r"""
+        Fits \hat{g}_k(Q_i, W_i, X_i) on training data and predicts ytilde on test data
+        """
         # Get train and test indices for the given fold
         train_data = self.data[train_idx]
         test_data = self.data[test_idx]
