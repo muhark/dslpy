@@ -5,7 +5,11 @@ dsl: Python Implementation of Design-based Supervised Learning (Egami, Hinck, St
 """
 
 from __future__ import annotations
+from dsl.dsl import DSLModel
 
 __version__ = "0.1.0"
 
 __all__ = ["__version__"]
+
+
+__all__.append("DSLModel")

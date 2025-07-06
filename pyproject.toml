@@ -29,7 +29,13 @@ classifiers = [
   "Typing :: Typed",
 ]
 dynamic = ["version"]
-dependencies = []
+dependencies = [
+    "numba>=0.60.0",
+    "numpy>=2.0.2",
+    "pandas>=2.3.0",
+    "scikit-learn>=1.6.1",
+    "scipy>=1.13.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/muhark/dslpy"
@@ -45,6 +51,9 @@ test = [
 ]
 dev = [
   { include-group = "test" },
+  "pytest>=8.4.0",
+  "ipython>=8.18.1",
+  "ipykernel>=6.29.5",
 ]
 docs = [
   "sphinx>=7.0",
